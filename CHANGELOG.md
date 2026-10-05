@@ -3,6 +3,19 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 versions follow [Semantic Versioning](https://semver.org/).
 
+## Chat Bubbles [0.1.9] — 2026-10-06 (orzazade fork)
+
+### Fixed
+
+- In the terminal your prompts were never the text bubble. The terminal draws
+  every prompt folded (`isExpanded` false), and a folded prompt fell to the frame
+  around the engine's own row, which carried its `❯` and an empty top line into
+  the bubble. The terminal now gets the mod's own text bubble. A folded prompt
+  longer than 12 lines shows its head and `… N more lines · ctrl+o shows all`.
+- Fenced code in a reply was drawn bare, so a block in a plain language read as
+  reply text. Each block now sits on a card in the theme's code color, with its
+  language above it.
+
 ## Chat Bubbles [0.1.8] — 2026-10-05
 
 ### Fixed

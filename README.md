@@ -38,7 +38,7 @@ Requires Claude Code 2.1.286 or later (plugin function hooks), in the terminal o
 the desktop app's Code tab.
 
 ```
-/plugin marketplace add angeldelbiondo/claude-chat-bubbles
+/plugin marketplace add orzazade/claude-chat-bubbles
 /plugin install chat-bubbles@claude-chat-bubbles
 ```
 
@@ -120,7 +120,7 @@ Found a vulnerability? See [SECURITY.md](SECURITY.md).
 ## Development
 
 ```
-git clone https://github.com/angeldelbiondo/claude-chat-bubbles
+git clone https://github.com/orzazade/claude-chat-bubbles
 cd claude-chat-bubbles
 claude --plugin-dir ./chat-bubbles   # edits hot-reload
 ```

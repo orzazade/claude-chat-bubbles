@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Please **don't open a public issue**. Use GitHub's private reporting instead:
-[Report a vulnerability](https://github.com/angeldelbiondo/claude-chat-bubbles/security/advisories/new).
+[Report a vulnerability](https://github.com/orzazade/claude-chat-bubbles/security/advisories/new).
 You'll get a reply within 7 days.
 
 ## Scope

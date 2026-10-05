@@ -76,6 +76,8 @@ const SHIMMER_MS = 260
 // How wide the studio asks to dock beside a fullscreen transcript; the person's own drag wins.
 const STUDIO_COLUMNS = 64
 const YOURS = ['composer', 'sdk', 'bridge']
+// A folded prompt in the terminal shows this many lines; ctrl+o shows the rest.
+const FOLDED_LINES = 12
 
 // The app's row for a prompt leaves an empty pill (with no text it is only that,
 // under any attachments). Measured on desktop: a margin unit is 16px, the pill is
@@ -392,7 +394,11 @@ export const register: Register = on => {
     // can be tighter than a bubble) and `native` leaves it alone.
     const mode = style === 'outline' ? 'frame' : await read($, promptStyle)
     if (mode === 'native') return next(e)
-    if (mode === 'frame' || !e.props.isExpanded) {
+    // The terminal draws every prompt folded (`isExpanded` false). Framing the
+    // engine's row there brings its `❯` and empty top line into the bubble, and
+    // the terminal shows images as text anyway, so it gets the text bubble below.
+    const isTerminal = e.surface === 'terminal'
+    if (mode === 'frame' || (!e.props.isExpanded && !isTerminal)) {
       return right(
         <Box borderStyle="round" borderColor={look.you} backgroundColor={look.youBg} paddingX={1} flexShrink={1}>
           {await next(e)}
@@ -401,11 +407,19 @@ export const register: Register = on => {
     }
     // Only text: the app's own row is all there is to draw.
     if (e.props.text.trim() === '') return next(e)
+    // Folded, a long prompt shows its head and says how much ctrl+o adds.
+    const lines = e.props.text.split('\n')
+    const cut = !e.props.isExpanded && lines.length > FOLDED_LINES
     const text = (
-      <Box borderStyle="round" borderColor={look.you} backgroundColor={look.youBg} paddingX={1} flexShrink={1}>
+      <Box flexDirection="column" borderStyle="round" borderColor={look.you} backgroundColor={look.youBg} paddingX={1} flexShrink={1}>
         <Text color={look.youText} wrap="wrap">
-          {e.props.text}
+          {cut ? lines.slice(0, FOLDED_LINES).join('\n') : e.props.text}
         </Text>
+        {cut ? (
+          <Text key="you-more" color={look.muted}>
+            {`… ${lines.length - FOLDED_LINES} more lines · ctrl+o shows all`}
+          </Text>
+        ) : null}
       </Box>
     )
     // A prompt known to have no media is just the bubble. One with media also
@@ -414,7 +428,8 @@ export const register: Register = on => {
     // that row (a wrapper shrinks it and breaks its own right alignment); the
     // empty pill it leaves is covered by pulling the bubble up.
     // The terminal draws images as text inside the prompt, so there it is just the bubble.
-    if (e.surface === 'terminal') return right(text)
+    // The engine's row left a blank line above the prompt; keep that air.
+    if (isTerminal) return <Box marginTop={1}>{right(text)}</Box>
     // Never seen (sent before the mod was installed): the app's own row, so
     // nothing is lost and no empty pill is left behind.
     const known = (await read($, media))[e.requestId]

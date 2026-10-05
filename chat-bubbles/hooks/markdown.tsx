@@ -10,7 +10,7 @@ import type { ElementTable, RenderNode } from 'claude-code'
 
 import type { Look } from './look'
 
-export type Kit = Pick<ElementTable, 'Text' | 'Code' | 'Markdown'>
+export type Kit = Pick<ElementTable, 'Box' | 'Text' | 'Code' | 'Markdown'>
 
 // `code` | **bold** | __bold__ | ~~strike~~ | *italic* | _italic_. The last
 // needs a non-word character (or the start) before it and none after, so
@@ -68,10 +68,11 @@ const LIST = /^(\s*)([-*+]|\d+[.)])\s+(\[[ xX]\]\s+)?(.*)$/
 const QUOTE = /^\s*>\s?(.*)$/
 
 export const paint = (K: Kit, md: string, look: Look): RenderNode[] => {
-  const { Text, Code, Markdown } = K
+  const { Box, Text, Code, Markdown } = K
   const lines = md.split('\n')
   const out: RenderNode[] = []
   let i = 0
+  let cards = 0
   while (i < lines.length) {
     const line = lines[i] ?? ''
 
@@ -83,7 +84,15 @@ export const paint = (K: Kit, md: string, look: Look): RenderNode[] => {
       i++
       while (i < lines.length && !close.test(lines[i] ?? '')) body.push(lines[i++] ?? '')
       i++
-      out.push(<Code source={body.join('\n')} language={fence[2] || undefined} />)
+      // A card of its own: bare, a block in a plain language read as reply text.
+      const language = fence[2] || undefined
+      cards++
+      out.push(
+        <Box key={cards === 1 ? 'code-card' : `code-card-${cards}`} flexDirection="column" backgroundColor={look.codeBg} paddingX={1} marginY={1}>
+          {language ? <Text color={look.muted}>{language}</Text> : null}
+          <Code source={body.join('\n')} language={language} />
+        </Box>,
+      )
       continue
     }
 
