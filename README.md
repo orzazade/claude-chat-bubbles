@@ -1,5 +1,12 @@
 # Chat Bubbles for Claude Code
 
+> **This fork** (orzazade, 0.3.0) redesigns the transcript for reading speed:
+> Claude's text without cards, notes before a tool call in readable grey, the
+> answer bright with `✦`, tool calls as one line, a full-width rule with time
+> and cost after each turn, and colours tested for contrast on all 441 themes.
+> See [DESIGN.md](DESIGN.md) for the rules and [CHANGELOG.md](CHANGELOG.md) for
+> the details. The picture below shows the original look.
+
 Your chat with Claude, laid out like every messenger you already use: **your
 messages on the right, Claude's on the left**, and your bubble in a **rival
 color** so you can tell who said what before you read a word.

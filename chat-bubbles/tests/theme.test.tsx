@@ -139,7 +139,7 @@ describe('drawing', () => {
         component: 'AssistantMessage',
         props: { text: '# Plan\n- one **bold** step\n- `code` here', isFirstOfReply: true },
       })
-      expect(await ui.find({ type: 'Text', text: '✦ Claude' })).toBeTruthy()
+      expect(await ui.find({ type: 'Text', text: '✦ ' })).toBeTruthy()
       expect(await ui.find({ type: 'Text', text: 'bold' })).toBeTruthy()
     })
 

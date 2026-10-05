@@ -17,6 +17,8 @@ export type Look = {
   canvas: string
   replyBg: string
   codeBg: string
+  /** Inline code on its chip: 4.5:1 on `codeBg`. */
+  code: string
   /** Body text on a reply card. */
   text: string
   /** Headings, labels: large or bold text, so 3:1 is the bar. */
@@ -29,7 +31,14 @@ export type Look = {
   you: string
   youBg: string
   youText: string
-  /** Quiet labels: hints, the footer, finished tools. */
+  /** A side note inside your bubble ("… 12 more lines"): 4.5:1 on the bubble. */
+  youQuiet: string
+  /**
+   * Secondary text that must still read: work notes, tool lines, the turn time.
+   * A near-neutral grey, at least 5:1 on the canvas (WCAG AA wants 4.5:1).
+   */
+  quiet: string
+  /** Decoration only, never words: the `┊` gutter, rules. 3:1 is its bar. */
   muted: string
   error: string
 }
@@ -53,7 +62,9 @@ export const lookOf = (pal: Palette, base: Base = 'dark', bgOverride: string | n
   const calm = (hex: string) => mix(hex, ink, CALM)
   const custom = bgOverride ?? pal.background
   const replyBg = custom ?? mix(canvas, pal.secondary, base === 'dark' ? 0.06 : 0.04)
-  const codeBg = mix(replyBg, pal.highlight, base === 'dark' ? 0.14 : 0.1)
+  // A neutral step off the canvas: tinted with `highlight`, chips and code cards
+  // took the orange that means "you".
+  const codeBg = mix(canvas, ink, base === 'dark' ? 0.08 : 0.06)
   const rival = RIVAL[isCool(pal.accent) ? 'warm' : 'cool'][base]
   const youBg = mix(custom ?? canvas, rival, base === 'dark' ? 0.16 : 0.1)
 
@@ -62,14 +73,22 @@ export const lookOf = (pal: Palette, base: Base = 'dark', bgOverride: string | n
     canvas,
     replyBg,
     codeBg,
-    text: ensureContrast(mix(pal.text, ink, 0.5), replyBg, 4.5),
-    accent: ensureContrast(calm(pal.accent), replyBg, 3),
-    secondary: ensureContrast(calm(pal.secondary), replyBg, 3),
-    highlight: ensureContrast(calm(pal.highlight), replyBg, 3),
+    code: ensureContrast(calm(pal.secondary), codeBg, 4.5),
+    // The answer: replies sit on the canvas (no card), and must stand well above
+    // the work (quiet, 5:1), so 9:1 on every theme, light ones included.
+    text: ensureContrast(mix(pal.text, ink, 0.5), canvas, 9),
+    accent: ensureContrast(calm(pal.accent), custom ?? canvas, 3),
+    secondary: ensureContrast(calm(pal.secondary), custom ?? canvas, 3),
+    highlight: ensureContrast(calm(pal.highlight), custom ?? canvas, 3),
     frame: mix(replyBg, pal.secondary, 0.35),
     you: ensureContrast(rival, youBg, 3),
     youBg,
     youText: ensureContrast(ink, youBg, 4.5),
+    youQuiet: ensureContrast(mix(ink, youBg, 0.35), youBg, 4.5),
+    // Grey half way between ink and canvas, with a touch of the theme's text so
+    // it belongs to the palette; tinting it with a vivid colour made it unreadable.
+    // Also used on a code card (its language label), so it must read on codeBg too.
+    quiet: ensureContrast(ensureContrast(mix(mix(ink, canvas, 0.5), pal.text, 0.15), canvas, 5), codeBg, 4.5),
     muted: ensureContrast(mix(pal.secondary, canvas, 0.45), canvas, 3),
     error: ERROR[base],
   }

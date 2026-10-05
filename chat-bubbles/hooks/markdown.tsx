@@ -28,21 +28,23 @@ export const inline = (K: Kit, line: string, look: Look): RenderNode[] => {
     const at = (m.index ?? 0) + lead.length
     const tok = m[7] ?? m[0]
     if (at > last) out.push(line.slice(last, at))
+    // Not `highlight`: it can match your bubble's colour (Tokyo Night: orange),
+    // and that colour means "you".
     if (m[1]) {
       out.push(
-        <Text color={look.highlight} backgroundColor={look.codeBg}>
+        <Text color={look.code} backgroundColor={look.codeBg}>
           {` ${tok.slice(1, -1)} `}
         </Text>,
       )
     } else if (m[2] || m[3]) {
       out.push(
-        <Text bold color={look.highlight}>
+        <Text bold color={look.text}>
           {tok.slice(2, -2)}
         </Text>,
       )
     } else if (m[4]) {
       out.push(
-        <Text strikethrough color={look.muted}>
+        <Text strikethrough color={look.quiet}>
           {tok.slice(2, -2)}
         </Text>,
       )
@@ -66,11 +68,29 @@ const HEADING = /^(#{1,6})\s+(.*?)\s*#*\s*$/
 const RULE = /^\s*([-*_])(\s*\1){2,}\s*$/
 const LIST = /^(\s*)([-*+]|\d+[.)])\s+(\[[ xX]\]\s+)?(.*)$/
 const QUOTE = /^\s*>\s?(.*)$/
+// Prose wider than this is hard to read on a wide terminal (DESIGN.md rule 5).
+const PROSE = 100
 
-export const paint = (K: Kit, md: string, look: Look): RenderNode[] => {
+export const paint = (K: Kit, md: string, look: Look, columns = PROSE): RenderNode[] => {
+  // Prose is capped at PROSE, and never wider than the room it is given.
+  const proseWidth = Math.max(20, Math.min(PROSE, columns))
   const { Box, Text, Code, Markdown } = K
   const lines = md.split('\n')
   const out: RenderNode[] = []
+  // Prose lines gather into blocks capped at PROSE columns; code cards and
+  // tables sit between them at the full width.
+  let prose: RenderNode[] = []
+  let blocks = 0
+  const flush = () => {
+    if (prose.length === 0) return
+    blocks++
+    out.push(
+      <Box key={`prose-${blocks}`} flexDirection="column" width={proseWidth}>
+        {prose}
+      </Box>,
+    )
+    prose = []
+  }
   let i = 0
   let cards = 0
   while (i < lines.length) {
@@ -87,9 +107,10 @@ export const paint = (K: Kit, md: string, look: Look): RenderNode[] => {
       // A card of its own: bare, a block in a plain language read as reply text.
       const language = fence[2] || undefined
       cards++
+      flush()
       out.push(
         <Box key={cards === 1 ? 'code-card' : `code-card-${cards}`} flexDirection="column" backgroundColor={look.codeBg} paddingX={1} marginY={1}>
-          {language ? <Text color={look.muted}>{language}</Text> : null}
+          {language ? <Text color={look.quiet}>{language}</Text> : null}
           <Code source={body.join('\n')} language={language} />
         </Box>,
       )
@@ -99,6 +120,7 @@ export const paint = (K: Kit, md: string, look: Look): RenderNode[] => {
     if (TABLE.test(line)) {
       const rows: string[] = []
       while (i < lines.length && TABLE.test(lines[i] ?? '')) rows.push(lines[i++] ?? '')
+      flush()
       out.push(<Markdown text={rows.join('\n')} />)
       continue
     }
@@ -106,7 +128,7 @@ export const paint = (K: Kit, md: string, look: Look): RenderNode[] => {
     i++
 
     if (LINK.test(line)) {
-      out.push(<Markdown text={line} />)
+      prose.push(<Markdown text={line} />)
       continue
     }
 
@@ -114,22 +136,18 @@ export const paint = (K: Kit, md: string, look: Look): RenderNode[] => {
     if (heading) {
       const level = (heading[1] ?? '#').length
       const title = heading[2] ?? ''
-      out.push(
-        level === 1 ? (
-          <Text bold underline color={look.accent}>
-            {inline(K, title, look)}
-          </Text>
-        ) : (
-          <Text bold color={level === 2 ? look.accent : look.secondary}>
-            {inline(K, title, look)}
-          </Text>
-        ),
+      // Weight, not colour: a heading is bold in the text colour (DESIGN.md
+      // never-use: accent-coloured headings in prose). A top heading is underlined.
+      prose.push(
+        <Text bold underline={level === 1} color={look.text}>
+          {inline(K, title, look)}
+        </Text>,
       )
       continue
     }
 
     if (RULE.test(line)) {
-      out.push(
+      prose.push(
         <Text color={look.muted}>
           {'─'.repeat(28)}
         </Text>,
@@ -143,7 +161,7 @@ export const paint = (K: Kit, md: string, look: Look): RenderNode[] => {
       const marker = item[2] ?? '-'
       const task = item[3]
       const mark = task ? (/[xX]/.test(task) ? '☑ ' : '☐ ') : /\d/.test(marker) ? `${marker} ` : indent.length >= 2 ? '◦ ' : '• '
-      out.push(
+      prose.push(
         <Text color={look.text}>
           {indent}
           <Text bold color={look.secondary}>
@@ -157,7 +175,7 @@ export const paint = (K: Kit, md: string, look: Look): RenderNode[] => {
 
     const quote = line.match(QUOTE)
     if (quote) {
-      out.push(
+      prose.push(
         <Text>
           <Text color={look.secondary}>{'▌ '}</Text>
           <Text italic color={look.text}>
@@ -168,7 +186,8 @@ export const paint = (K: Kit, md: string, look: Look): RenderNode[] => {
       continue
     }
 
-    out.push(<Text color={look.text}>{line.trim() === '' ? ' ' : inline(K, line, look)}</Text>)
+    prose.push(<Text color={look.text}>{line.trim() === '' ? ' ' : inline(K, line, look)}</Text>)
   }
+  flush()
   return out
 }

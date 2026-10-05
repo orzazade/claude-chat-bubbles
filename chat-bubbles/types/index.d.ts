@@ -50,12 +50,25 @@ declare module 'claude-code' {
       resolvedBase: 'dark' | 'light'
       /** A background that overrides every theme's, from `/theme bg`. */
       bgOverride: string | null
-      /** Claude Code's `prefersReducedMotion`: no shimmer when true. */
-      reducedMotion: boolean
-      /** The spinner's shimmer frame while a turn runs. */
-      frame: number
       /** The studio's last status line. */
       notice: string
+      /**
+       * Reply text blocks a later tool call followed: work, drawn dim. Keyed by
+       * the row id's first 23 characters (the drawn id zeroes the rest).
+       */
+      work: Record<string, true>
+      /**
+       * Your messages the session stored (prompts, delivered queued messages,
+       * slash commands), by row key. A message with no key here, drawn while a
+       * turn runs, is still in the queue.
+       */
+      sent: Record<string, true>
+      /**
+       * The main thread's last turns: how long each took, when it ended, and
+       * what it cost (null where the host gives no cost). The turn-end line
+       * finds its own by duration.
+       */
+      turns: { durationMs: number; at: number; usd: number | null }[]
     }
   }
 }

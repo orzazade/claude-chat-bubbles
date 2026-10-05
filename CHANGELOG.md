@@ -3,6 +3,42 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 versions follow [Semantic Versioning](https://semver.org/).
 
+## Chat Bubbles [0.3.0] — 2026-10-06 (orzazade fork)
+
+A redesign for reading speed. The rules are in [DESIGN.md](DESIGN.md).
+
+### Changed
+
+- **Answer vs work.** Claude's text has no card, border or header any more, so it
+  looks the same while it streams and after it lands (no jump). A text block
+  followed by a tool call is work: grey, under a `┊`. The newest text stays bright
+  with `✦`, so the last one in a turn is the answer.
+- **Tool rows are one line** saying what the call did (`┊ ✓ Show the fork's
+  uncommitted changes  +1 more`); running is `●` in blue. A failed call is a red
+  line with the start of its error, next to the rest of its group.
+- **A full-width rule ends each turn**: `── Baked for 1m 51s · 02:59 · $1.95 ──…`
+  (duration, end time, what the turn cost).
+- **Readable colours, tested on all 441 themes, dark and light**: secondary text
+  (`quiet`) at least 5:1, the answer at least 9:1 and 1.5x the work, inline code
+  4.5:1 on a neutral grey chip. Orange means you and nothing else: bold, inline
+  code and running marks no longer use the theme's `highlight`. Headings are bold
+  text, not accent colour.
+- **Prose is capped at 100 columns** (less on a narrow terminal); code and tables
+  use the full width.
+- **No timers.** The spinner is Claude Code's own; the 260 ms shimmer is gone.
+
+### Fixed
+
+- Your bubble sat 18% in from the left (0.1.9): back at the right edge.
+- One blank line above your bubble, not three.
+- A message typed while a turn runs (queued) looked like a sent one. It keeps
+  Claude Code's queued look until delivered. Sent rows and work marks are kept
+  across reloads and resumes; subagent rows are ignored.
+
+### Known limits
+
+- Two sessions in one desktop process share the turn tracking.
+
 ## Chat Bubbles [0.1.9] — 2026-10-06 (orzazade fork)
 
 ### Fixed

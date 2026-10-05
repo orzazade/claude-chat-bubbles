@@ -64,10 +64,11 @@ describe('every preset', () => {
     for (const one of PRESETS) {
       for (const base of ['dark', 'light'] as const) {
         const look = lookOf(one, base)
-        expect(contrast(look.text, look.replyBg) >= 4.5).toBe(true)
+        // Replies sit on the canvas now (no card), so that is what they are checked on.
+        expect(contrast(look.text, look.canvas) >= 4.5).toBe(true)
         expect(contrast(look.youText, look.youBg) >= 4.5).toBe(true)
         expect(contrast(look.you, look.youBg) >= 3).toBe(true)
-        expect(contrast(look.accent, look.replyBg) >= 3).toBe(true)
+        expect(contrast(look.accent, look.canvas) >= 3).toBe(true)
       }
     }
   })

@@ -5,10 +5,10 @@
 // Forked from Theme Studio by Alliance Optima (MIT).
 
 import { atom, read, update } from 'claude-code'
-import type { ElementTable, EngineInterface, Register, RenderNode, Timer } from 'claude-code'
+import type { ElementTable, EngineInterface, Register, RenderNode } from 'claude-code'
 
 import type { BaseMode, MessageStyle, Palette, PromptStyle } from '../types'
-import { isHex, loopGradient, normalizeHex } from './color'
+import { isHex, normalizeHex } from './color'
 import { lookOf, stripOf } from './look'
 import type { Base, Look } from './look'
 import { paint } from './markdown'
@@ -45,9 +45,67 @@ const themeChrome = atom({ plugin: 'chat-bubbles', key: 'themeChrome' } as const
 const base = atom({ plugin: 'chat-bubbles', key: 'base' } as const, 'auto')
 const resolvedBase = atom({ plugin: 'chat-bubbles', key: 'resolvedBase' } as const, 'dark')
 const bgOverride = atom({ plugin: 'chat-bubbles', key: 'bgOverride' } as const, null)
-const reducedMotion = atom({ plugin: 'chat-bubbles', key: 'reducedMotion' } as const, false)
-const frame = atom({ plugin: 'chat-bubbles', key: 'frame' } as const, 0)
 const notice = atom({ plugin: 'chat-bubbles', key: 'notice' } as const, '')
+const work = atom({ plugin: 'chat-bubbles', key: 'work' } as const, {})
+const sent = atom({ plugin: 'chat-bubbles', key: 'sent' } as const, {})
+const turns = atom({ plugin: 'chat-bubbles', key: 'turns' } as const, [])
+
+// A stored row's uuid and the id its drawing carries share these characters;
+// the drawn id zeroes the last 12 hex digits.
+const rowKey = (id: string) => id.slice(0, 23)
+// Work is drawn in the look's quiet colors; inline code keeps its chip.
+const dimmed = new WeakMap<Look, Look>()
+const dimOf = (look: Look): Look => {
+  const hit = dimmed.get(look)
+  if (hit) return hit
+  const dim = { ...look, text: look.quiet, accent: look.quiet, secondary: look.quiet }
+  dimmed.set(look, dim)
+  return dim
+}
+// What a tool call did, in a few words: a shell command's own description, else
+// the file, pattern or path it touched, else the tool's name.
+const callLabel = (call: { tool: string; input: unknown }): string => {
+  const input = call.input && typeof call.input === 'object' ? (call.input as Record<string, unknown>) : {}
+  for (const field of ['description', 'file_path', 'pattern', 'path', 'url', 'query', 'command']) {
+    const value = input[field]
+    if (typeof value !== 'string' || value.trim() === '') continue
+    // `src/hooks/` names `hooks`: a trailing slash would leave an empty name.
+    const text = field === 'file_path' || field === 'path' ? `${call.tool} ${value.replace(/\/+$/, '').split('/').pop() || value}` : value
+    const line = text.split('\n')[0] ?? text
+    return line.length > 80 ? `${line.slice(0, 79)}…` : line
+  }
+  return call.tool
+}
+// The first line of a failed call's error, whatever shape the output takes.
+const errorLine = (output: unknown): string => {
+  const raw =
+    typeof output === 'string'
+      ? output
+      : output && typeof output === 'object'
+        ? ['error', 'message', 'stderr', 'text'].map(k => (output as Record<string, unknown>)[k]).find(v => typeof v === 'string')
+        : undefined
+  const line = typeof raw === 'string' ? (raw.trim().split('\n')[0] ?? '') : ''
+  return line.length > 120 ? `${line.slice(0, 119)}…` : line
+}
+const blockKinds = (content: unknown): string[] =>
+  Array.isArray(content) ? content.map(b => (b && typeof b === 'object' && 'type' in b ? String(b.type) : '')) : ['text']
+// The newest text block of the main thread's running turn; a tool call after it makes it work.
+let lastText: string | null = null
+let turnOpen = false
+// Row keys kept in `sent` and `work`, newest last; older ones drop off.
+const KEEP = 3000
+// The session's spend when the running main-thread turn opened, for its cost.
+let turnStartUsd: number | null = null
+// A turn-end line and its turn match on the duration both carry, within this.
+const SAME_TURN_MS = 250
+
+/** `14:05`: the clock time a turn ended, in the machine's time zone. */
+export const clockTime = (ms: number) => {
+  const d = new Date(ms)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+/** `$0.40`, or `<$0.01` for a turn that cost almost nothing. */
+export const usdText = (usd: number) => (usd < 0.01 ? '<$0.01' : `$${usd.toFixed(2)}`)
 
 const STYLES: readonly MessageStyle[] = ['full', 'outline', 'off']
 const STYLE_LABEL: Record<MessageStyle, string> = { full: 'full color', outline: 'outline only', off: 'off' }
@@ -64,15 +122,6 @@ const SLOTS: readonly { slot: Slot; label: string }[] = [
   { slot: 'background', label: 'Background' },
 ]
 
-const SPARKS = ['✦', '✧', '✶', '✷', '✸', '✹', '✸', '✷']
-const MODE_LABEL: Record<string, string> = {
-  thinking: 'thinking',
-  requesting: 'warming up',
-  responding: 'writing',
-  'tool-input': 'preparing',
-  'tool-use': 'working',
-}
-const SHIMMER_MS = 260
 // How wide the studio asks to dock beside a fullscreen transcript; the person's own drag wins.
 const STUDIO_COLUMNS = 64
 const YOURS = ['composer', 'sdk', 'bridge']
@@ -102,6 +151,46 @@ const HELP = [
 ].join('\n')
 
 // ── Engine-facing helpers (top level, as the engine requires for `$`) ─────
+
+// Adds a row key to `sent` or `work` and saves it, so a reload or a resumed
+// session still knows which messages were sent and which text was work.
+async function keep($: EngineInterface, which: 'sent' | 'work', key: string) {
+  const add = (was: Record<string, true>) => {
+    if (was[key]) return was
+    const all: Record<string, true> = { ...was, [key]: true }
+    const keys = Object.keys(all)
+    return keys.length > KEEP ? Object.fromEntries(keys.slice(-KEEP).map(k => [k, true as const])) : all
+  }
+  // Session state now (drawings read it); the store is written once a turn, by saveMarks.
+  if (which === 'sent') await update($, sent, add)
+  else await update($, work, add)
+}
+
+// Writes `sent` and `work` to the store, so a reload or resume keeps them:
+// once per turn, not on every row.
+async function saveMarks($: EngineInterface) {
+  await persist($, 'sent', await read($, sent))
+  await persist($, 'work', await read($, work))
+}
+
+// What the session has spent so far, or null where the host does not say.
+async function sessionUsd($: EngineInterface): Promise<number | null> {
+  try {
+    const usd = (await $.session.usage()).cost?.usd
+    return typeof usd === 'number' ? usd : null
+  } catch {
+    return null
+  }
+}
+
+// Typed while a turn runs, a message waits in a queue and is redrawn with a
+// fresh id each time, one no sent row has; it keeps the engine's queued look.
+// A stored prompt is drawn with its uuid's last 12 hex digits zeroed, so that
+// id is never a queued one, recorded or not (older history included).
+async function isQueued($: EngineInterface, id: string) {
+  if (!turnOpen || id === 'placeholder' || id.endsWith('-000000000000')) return false
+  return (await read($, sent))[rowKey(id)] !== true
+}
 
 async function persist($: EngineInterface, key: string, value: unknown) {
   try {
@@ -173,14 +262,17 @@ async function restore($: EngineInterface) {
   const storedMedia = await get('media')
   const stored = typeof storedMedia === 'object' && storedMedia !== null && !Array.isArray(storedMedia) ? storedMedia : {}
   await persist($, 'media', await update($, media, seen => clean({ ...stored, ...seen })))
+  // Which messages were sent and which text was work, from earlier runs: row keys only.
+  const keys = (raw: unknown): Record<string, true> =>
+    typeof raw === 'object' && raw !== null && !Array.isArray(raw)
+      ? Object.fromEntries(Object.keys(raw).filter(k => /^[0-9a-f-]{23}$/.test(k)).map(k => [k, true as const]))
+      : {}
+  const storedSent = keys(await get('sent'))
+  await update($, sent, was => ({ ...storedSent, ...was }))
+  const storedWork = keys(await get('work'))
+  await update($, work, was => ({ ...storedWork, ...was }))
   const storedBg = await get('bgOverride')
   if (storedBg === null || isHex(storedBg)) await update($, bgOverride, () => storedBg)
-  try {
-    const settings = await $.settings.read()
-    await update($, reducedMotion, () => settings.prefersReducedMotion === true)
-  } catch {
-    // Settings unreadable: keep the motion on.
-  }
 }
 
 async function step($: EngineInterface, delta: number) {
@@ -241,12 +333,6 @@ const listing = (collection?: string, mine: readonly Palette[] = []) => {
 // ── Hooks ────────────────────────────────────────────────────────────────
 
 export const register: Register = on => {
-  let tick: Timer | null = null
-  const stopShimmer = () => {
-    tick?.cancel()
-    tick = null
-  }
-
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'bubbles',
@@ -265,16 +351,20 @@ export const register: Register = on => {
     return done
   })
 
-  on('prompt.submit', async ($, e, next) => {
-    stopShimmer()
-    if ((await chromeLook($)) && !(await read($, reducedMotion))) {
-      tick = $.clock.every(SHIMMER_MS, () => void update($, frame, f => (f + 1) % 960))
-    }
-    return next(e)
-  })
-
+  // No shimmer timer: a redraw every 260 ms for a whole turn costs more than a
+  // moving spark is worth (DESIGN.md, performance).
   on('turn.complete', async ($, e, next) => {
-    stopShimmer()
+    // No main-thread turn runs now, so nothing is queued. A subagent's turn
+    // ending (`agentId`) leaves the main one open.
+    if (e.agentId === undefined) {
+      turnOpen = false
+      // When it ended and what it cost, for its turn-end line (matched on duration).
+      const end = await sessionUsd($)
+      const usd = end !== null && turnStartUsd !== null ? Math.max(0, end - turnStartUsd) : null
+      const at = await $.clock.now()
+      await update($, turns, was => [...was.slice(-199), { durationMs: e.durationMs, at, usd }])
+      await saveMarks($)
+    }
     return next(e)
   })
 
@@ -345,6 +435,49 @@ export const register: Register = on => {
     })
   }
 
+  // Answer vs work. Each block of a reply is its own `response` row. A text
+  // block is bright when it lands, as it looked while streaming; a tool call
+  // after it in the same turn makes it work. The newest text stays bright, so
+  // the turn's last text is the answer and nothing changes when the turn ends.
+  // A prompt, or a queued message once delivered, opens a turn. A subagent's
+  // rows (`agentId`) belong to its own loop and leave the main thread alone.
+  for (const door of ['prompt', 'delivery'] as const) {
+    on('session.append', { door }, async ($, e, next) => {
+      // Recorded first: a redraw between opening the turn and recording the
+      // row would show the message just sent in the queued look.
+      await keep($, 'sent', rowKey(e.uuid))
+      if (e.agentId === undefined) {
+        lastText = null
+        // A prompt always opens a new turn; a queued message delivered into a
+        // running one does not, so the turn keeps its starting spend.
+        if (door === 'prompt' || !turnOpen) turnStartUsd = await sessionUsd($)
+        turnOpen = true
+      }
+      return next(e)
+    })
+  }
+  on('session.append', { door: 'command' }, async ($, e, next) => {
+    await keep($, 'sent', rowKey(e.uuid))
+    return next(e)
+  })
+  on('session.append', { door: 'response' }, async ($, e, next) => {
+    if (e.agentId === undefined) {
+      const kinds = blockKinds(e.message.content)
+      const hasTool = kinds.includes('tool_use')
+      if (hasTool && lastText) {
+        const key = lastText
+        lastText = null
+        await keep($, 'work', key)
+      }
+      // A row holding text and a tool call: its own call follows its text.
+      if (kinds.includes('text')) {
+        if (hasTool) await keep($, 'work', rowKey(e.uuid))
+        else lastText = rowKey(e.uuid)
+      }
+    }
+    return next(e)
+  })
+
   // Your prompts: a bubble on the right in the rival color, the way every
   // messenger does it. Other user-role rows (task notifications, messages from
   // agents) stay on the left with a quiet stripe.
@@ -355,6 +488,8 @@ export const register: Register = on => {
     const { look } = current
     const { Box, Text } = $.ui.resolve(e)
     const isYours = YOURS.includes(e.props.origin.kind)
+    // Still waiting in the queue: the engine's own queued look says so.
+    if (isYours && (await isQueued($, e.requestId))) return next(e)
 
     if (!isYours) {
       if (!(await read($, themeChrome))) return next(e)
@@ -416,7 +551,7 @@ export const register: Register = on => {
           {cut ? lines.slice(0, FOLDED_LINES).join('\n') : e.props.text}
         </Text>
         {cut ? (
-          <Text key="you-more" color={look.muted}>
+          <Text key="you-more" color={look.youQuiet}>
             {`… ${lines.length - FOLDED_LINES} more lines · ctrl+o shows all`}
           </Text>
         ) : null}
@@ -428,8 +563,14 @@ export const register: Register = on => {
     // that row (a wrapper shrinks it and breaks its own right alignment); the
     // empty pill it leaves is covered by pulling the bubble up.
     // The terminal draws images as text inside the prompt, so there it is just the bubble.
-    // The engine's row left a blank line above the prompt; keep that air.
-    if (isTerminal) return <Box marginTop={1}>{right(text)}</Box>
+    // A column, so the row inside stretches to full width and can push right.
+    // No margin: the transcript already leaves a line between rows.
+    if (isTerminal)
+      return (
+        <Box key="you-air" flexDirection="column">
+          {right(text)}
+        </Box>
+      )
     // Never seen (sent before the mod was installed): the app's own row, so
     // nothing is lost and no empty pill is left behind.
     const known = (await read($, media))[e.requestId]
@@ -443,29 +584,39 @@ export const register: Register = on => {
     )
   })
 
-  // Claude's replies: on the left, a quiet card; the label is text, not a bar.
+  // Claude's replies: plain text, as the engine draws them while they stream, so
+  // nothing jumps when the stored row replaces the live one (no card, no border,
+  // no header). Work is dim under a `┊`; the newest text is bright, `✦` on the
+  // block that opens a reply. Replies have no fill in any style now, so `outline`
+  // draws them like `full`; `off` and huge rows keep the engine's own.
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
     const style = await read($, messageStyle)
     const current = await currentLook($)
-    if (!current || style === 'off') return next(e)
+    if (!current || style === 'off' || e.props.text.length > 30000) return next(e)
     const { look } = current
     const els = $.ui.resolve(e)
     const { Box, Text } = els
-    if (style === 'outline' || e.props.text.length > 30000) {
+    // The room beside the 2-column mark, and the engine's 4 at the right; wide when unknown.
+    const room = (e.viewport?.columns ?? 106) - 6
+    const isWork = e.props.isSummary === true || (await read($, work))[rowKey(e.requestId)] === true
+    if (isWork) {
       return (
-        <Box borderStyle="round" borderColor={look.frame} paddingX={1}>
-          {await next(e)}
+        <Box key="work" flexDirection="row">
+          <Text color={look.muted}>{'┊ '}</Text>
+          <Box flexDirection="column" flexShrink={1}>
+            {paint(els, e.props.text, dimOf(look), room)}
+          </Box>
         </Box>
       )
     }
     return (
-      <Box flexDirection="column" borderStyle="round" borderColor={look.frame} backgroundColor={look.replyBg} paddingX={1}>
-        {e.props.isFirstOfReply ? (
-          <Text bold color={look.accent}>
-            {'✦ Claude'}
-          </Text>
-        ) : null}
-        {paint(els, e.props.text, look)}
+      <Box key="answer" flexDirection="row">
+        <Text bold color={look.accent}>
+          {e.props.isFirstOfReply ? '✦ ' : '  '}
+        </Text>
+        <Box flexDirection="column" flexShrink={1}>
+          {paint(els, e.props.text, look, room)}
+        </Box>
       </Box>
     )
   })
@@ -481,7 +632,7 @@ export const register: Register = on => {
       <Box flexDirection="row" gap={1}>
         {e.props.modes.length > 0 ? (
           isChrome ? (
-            <Text color={look.muted}>{e.props.modes.join(' & ')}</Text>
+            <Text color={look.quiet}>{e.props.modes.join(' & ')}</Text>
           ) : (
             <Text dimColor>{e.props.modes.join(' & ')}</Text>
           )
@@ -506,21 +657,29 @@ export const register: Register = on => {
     const current = await chromeLook($)
     if (!current || e.surface === 'terminal') return next(e)
     const { Text } = $.ui.resolve(e)
-    return <Text color={current.look.muted}>{e.props.tail ? `${e.props.hint} ${e.props.tail}` : e.props.hint}</Text>
+    return <Text color={current.look.quiet}>{e.props.tail ? `${e.props.hint} ${e.props.tail}` : e.props.hint}</Text>
   })
 
-  // "Baked for 12s" at the end of a turn (terminal), with a spark.
+  // "Baked for 12s" at the end of a turn, quiet: `✦` belongs to the answer alone.
   on('ui.render', { component: 'TurnDuration' }, async ($, e, next) => {
     const current = await chromeLook($)
     if (!current) return next(e)
     const { look } = current
     const { Text } = $.ui.resolve(e)
+    // The turn's end time and cost join the same line: no divider of its own.
+    // Until turn.complete has run (or for a turn from before the mod) it is the bare line.
+    const turn = (await read($, turns)).findLast(t => Math.abs(t.durationMs - e.props.durationMs) <= SAME_TURN_MS)
+    const extra = turn ? ` · ${clockTime(turn.at)}${turn.usd !== null ? ` · ${usdText(turn.usd)}` : ''}` : ''
+    const label = ` ${e.props.word} for ${formatDuration(e.props.durationMs)}${extra} `
+    // A full-width rule ends the turn, so turns read as separate blocks. Sized
+    // to the viewport (a cut line would end in an ellipsis), less 4 for the gutter.
+    const columns = e.viewport?.columns ?? 80
+    const tail = '─'.repeat(Math.max(2, columns - 4 - 2 - label.length))
     return (
-      <Text>
-        <Text bold color={look.accent}>
-          {'✦ '}
-        </Text>
-        <Text color={look.muted}>{`${e.props.word} for ${formatDuration(e.props.durationMs)}`}</Text>
+      <Text key="turn-rule">
+        <Text color={look.muted}>{'──'}</Text>
+        <Text color={look.quiet}>{label}</Text>
+        <Text color={look.muted}>{tail}</Text>
       </Text>
     )
   })
@@ -537,22 +696,59 @@ export const register: Register = on => {
     </K.Box>
   )
 
-  // Tool rows are striped in the terminal only: the desktop app draws its own
-  // folded tool summary, and a stripe around it is an empty bar.
-  // Finished tools stay quiet so the ones running (highlight) and failing (red) are what you see.
+  // Tool rows are work: in the terminal they sit under the same `┊` as the notes.
+  // A failed call keeps the engine's full drawing on a red strip, so its error
+  // reads; the rest stay quiet. The desktop app draws its own folded summary.
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
     const current = await chromeLook($)
     if (!current || e.surface !== 'terminal') return next(e)
     const { look } = current
-    const mark = e.props.isErrored ? look.error : e.props.isRunning ? look.highlight : look.muted
-    return striped(look, mark, await next(e), $.ui.resolve(e), e.props.isErrored ? 0.16 : 0.06)
+    if (e.props.isErrored) return striped(look, look.error, await next(e), $.ui.resolve(e), 0.16)
+    return striped(look, e.props.isRunning ? look.accent : look.muted, await next(e), $.ui.resolve(e), 0, '┊ ')
   })
 
+  // A folded run is one line saying what it did: the first call's own
+  // description, and how many more. ctrl+o (`isExpanded`) shows each call.
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
     const current = await chromeLook($)
     if (!current || e.surface !== 'terminal') return next(e)
     const { look } = current
-    return striped(look, e.props.isActive ? look.highlight : look.muted, await next(e), $.ui.resolve(e), 0.05)
+    const { calls } = e.props
+    if (e.props.isExpanded || calls.length === 0) return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    // A failed call is a red line of its own with the start of its error: the
+    // engine's folded block said only "Called <tool>", on an empty red strip.
+    // The rest of the group (running or fine) keeps its one summary line beside them.
+    const failed = calls.filter(c => c.isErrored)
+    const rest = calls.filter(c => !c.isErrored)
+    const running = rest.some(c => c.isRunning)
+    const first = rest[0]
+    const summary = first ? (
+      <Box key="tool-line" flexDirection="row">
+        <Text color={look.muted}>{'┊ '}</Text>
+        {/* Running is the accent: `highlight` can be the orange that means "you". */}
+        <Text color={running ? look.accent : look.quiet} wrap="truncate-end">
+          {`${running ? '●' : '✓'} ${callLabel(first)}${rest.length > 1 ? `  +${rest.length - 1} more` : ''}`}
+        </Text>
+      </Box>
+    ) : null
+    if (failed.length === 0) return summary ?? next(e)
+    return (
+      <Box key="tool-failed" flexDirection="column">
+        {failed.map((c, i) => {
+          const error = errorLine(c.output)
+          return (
+            <Box key={`failed-${c.tool_use_id ?? i}`} flexDirection="row">
+              <Text color={look.muted}>{'┊ '}</Text>
+              <Text color={look.error} wrap="truncate-end">
+                {`✗ ${callLabel(c)}${error ? ` — ${error}` : ''}`}
+              </Text>
+            </Box>
+          )
+        })}
+        {summary}
+      </Box>
+    )
   })
 
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
@@ -567,46 +763,6 @@ export const register: Register = on => {
     if (!current || e.surface !== 'terminal') return next(e)
     const { look } = current
     return striped(look, e.props.isErrored ? look.error : look.highlight, await next(e), $.ui.resolve(e), 0.08)
-  })
-
-  // The spinner: a twinkling spark and the word shimmering through the palette.
-  on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
-    const current = await chromeLook($)
-    if (!current) return next(e)
-    const { pal, look } = current
-    const { Box, Text } = $.ui.resolve(e)
-    const still = await read($, reducedMotion)
-    const f = still ? 0 : await read($, frame)
-    const stops = loopGradient([look.accent, look.secondary, look.highlight, look.secondary])
-    const spark = (
-      <Text bold color={stops[(f * 2) % stops.length] ?? pal.accent}>
-        {`${SPARKS[f % SPARKS.length] ?? '✦'} `}
-      </Text>
-    )
-    // The terminal keeps its own line (elapsed time, tokens) beside the spark.
-    if (e.surface === 'terminal') {
-      return (
-        <Box flexDirection="row">
-          {spark}
-          {await next(e)}
-        </Box>
-      )
-    }
-    const words = e.props.message ?? e.props.word
-    return (
-      <Box flexDirection="row" gap={1}>
-        <Text>
-          {spark}
-          {[...words].map((ch, i) => (
-            <Text bold color={stops[(i + f) % stops.length] ?? look.accent}>
-              {ch}
-            </Text>
-          ))}
-          <Text color={look.text}>{e.props.suffix}</Text>
-        </Text>
-        <Text color={look.muted}>{MODE_LABEL[e.props.mode] ?? ''}</Text>
-      </Box>
-    )
   })
 
   // Every pane a mod opens, this one included: a tinted backdrop.
@@ -686,7 +842,7 @@ export const register: Register = on => {
           ) : null}
           {search ? (
             <Box gap={1}>
-              <Text color={ui.muted}>{`${results.length === 40 ? '40+' : results.length} match${results.length === 1 ? '' : 'es'}`}</Text>
+              <Text color={ui.quiet}>{`${results.length === 40 ? '40+' : results.length} match${results.length === 1 ? '' : 'es'}`}</Text>
               <Button key="clear-search" label="Clear" plain dimColor onPress={() => update($, query, () => '')} />
             </Box>
           ) : Select ? (
@@ -705,7 +861,7 @@ export const register: Register = on => {
             </Box>
           )}
           {results.length === 0 ? (
-            <Text color={ui.muted}>{search ? 'No theme matches that.' : 'No saved themes yet. Mix one below and press Enter on "Save as".'}</Text>
+            <Text color={ui.quiet}>{search ? 'No theme matches that.' : 'No saved themes yet. Mix one below and press Enter on "Save as".'}</Text>
           ) : null}
           {results.map(one => (
             <Box key={`row-${one.id}`} gap={1}>
