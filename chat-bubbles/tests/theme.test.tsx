@@ -143,9 +143,11 @@ describe('drawing', () => {
       expect(await ui.find({ type: 'Text', text: 'bold' })).toBeTruthy()
     })
 
-    test(`the footer chip opens the studio on ${surface}`, ENGINE, async ($, on) => {
+    // The footer gave its theme chip's room to the context bar (user's choice,
+    // 10-06); `/bubbles` still opens the studio.
+    test(`the footer has no theme chip; /bubbles opens the studio on ${surface}`, ENGINE, async ($, on) => {
       const opened: { id: string; columns?: number; focus?: true }[] = []
-      // Stand in for the engine's pane host and record what the click asked for.
+      // Stand in for the engine's pane host and record what the command asked for.
       on('ui.open', (_$, e) => {
         opened.push({ id: e.id, columns: e.columns, focus: e.focus })
         return { value: { isPlaced: true } }
@@ -157,9 +159,8 @@ describe('drawing', () => {
         component: 'SessionMode',
         props: { modes: ['accept edits on'] },
       })
-      const chip = await ui.find({ type: 'Button', key: 'open-studio' })
-      expect(chip?.props.label).toBe('🎨 Dracula')
-      await ui.press({ key: 'open-studio' })
+      expect(await ui.find({ type: 'Button', key: 'open-studio' })).toBe(undefined)
+      await theme($, '')
       expect(opened).toEqual([{ id: 'chat-bubbles', columns: 64, focus: true }])
     })
 

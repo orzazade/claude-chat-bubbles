@@ -4,7 +4,10 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { clockTime } from '../hooks/register'
+import { ensureContrast } from '../hooks/color'
+import { lookOf } from '../hooks/look'
+import { PRESETS } from '../hooks/presets'
+import { BAR_COLOR, clockTime, contextBar, modelName, towardLimit } from '../hooks/register'
 
 const ENGINE = { timeoutMs: 20_000 }
 
@@ -320,6 +323,66 @@ describe('tool rows', () => {
   })
 })
 
+describe('one footer row', () => {
+  test('the session facts are buttons at the right end of the row; the model one opens /model', ENGINE, async ($, on) => {
+    const ran: string[] = []
+    on('session.model', () => ({ value: 'claude-opus-5-5' }) as never)
+    on('session.root', () => ({ value: '/work' }) as never)
+    on('process.run', () => ({ value: { exitCode: 0, stdout: 'main\n', stderr: '' } }) as never)
+    // 156,800 tokens against a 160,000 auto-compact threshold: 98% of the way.
+    const breakdown = { autoCompactThreshold: 160_000, isAutoCompactEnabled: true }
+    on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: 156_800, window: 200_000, percent: 78, breakdown }, rateLimits: [], cost: { usd: 32.456 } } }) as never)
+    on('command.run', (_$, e) => {
+      ran.push(e.command)
+      return { text: '' } as never
+    })
+    await theme($, 'tokyo night')
+    await $.turn.complete({ reason: 'answer', answer: 'ok', durationMs: 1000, isAborted: false, turnId: 'f1' } as never).catch(() => undefined)
+    const ui = await $.ui.mount({
+      plugin: 'chat-bubbles',
+      surface: 'terminal',
+      component: 'SessionMode',
+      props: { modes: [] } as never,
+    })
+    expect((await ui.find({ type: 'Button', key: 'fact-model' }))?.props.label).toBe('Opus 5.5 ▾')
+    expect(await ui.find({ type: 'Text', text: 'main' })).toBeTruthy()
+    expect((await ui.find({ type: 'Button', key: 'fact-context' }))?.props.label).toBe('98%')
+    expect(await ui.find({ type: 'Text', text: '█████████░' })).toBeTruthy()
+    expect((await ui.find({ type: 'Button', key: 'fact-cost' }))?.props.label).toBe('$32.46')
+    // The context bar is last, at the row's right edge (user's choice, 10-06).
+    expect((await ui.findAll({ type: 'Button' })).map(b => b.key)).toEqual(['fact-model', 'fact-cost', 'fact-context'])
+    await ui.press({ key: 'fact-model' })
+    await ui.press({ key: 'fact-context' })
+    await ui.press({ key: 'fact-cost' })
+    expect(ran.filter(c => c !== 'bubbles')).toEqual(['model', 'context', 'cost'])
+  })
+
+  test('a model picked from the button shows at once; a detached HEAD is no branch', ENGINE, async ($, on) => {
+    let model = 'claude-opus-5-5'
+    on('session.model', () => ({ value: model }) as never)
+    on('session.root', () => ({ value: '/work' }) as never)
+    on('process.run', () => ({ value: { exitCode: 0, stdout: 'HEAD\n', stderr: '' } }) as never)
+    on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [] } }) as never)
+    on('command.run', { command: 'model' }, () => {
+      model = 'claude-sonnet-4-20250514'
+      return { text: '' } as never
+    })
+    await theme($, 'tokyo night')
+    await $.turn.complete({ reason: 'answer', answer: 'ok', durationMs: 1000, isAborted: false, turnId: 'f2' } as never).catch(() => undefined)
+    const ui = await $.ui.mount({
+      plugin: 'chat-bubbles',
+      surface: 'terminal',
+      component: 'SessionMode',
+      props: { modes: [] } as never,
+    })
+    expect(await ui.find({ type: 'Text', text: 'HEAD' })).toBe(undefined)
+    // No token count yet (a fresh or just-compacted window): no bar, not a stale one.
+    expect(await ui.find({ type: 'Button', key: 'fact-context' })).toBe(undefined)
+    await ui.press({ key: 'fact-model' })
+    expect((await ui.find({ type: 'Button', key: 'fact-model' }))?.props.label).toBe('Sonnet 4 ▾')
+  })
+})
+
 describe('review fixes', () => {
   test('a prompt drawn with a stored id (zeroed tail) is never taken as queued', ENGINE, async ($, on) => {
     on('ui.render', { component: 'UserMessage' }, ($, e) => {
@@ -397,4 +460,46 @@ describe('code in a reply', () => {
       expect(await ui.find({ type: 'Text', text: 'bash' })).toBeTruthy()
     })
   }
+})
+
+describe('context bar', () => {
+  test('colour climbs green, yellow, orange, red toward the limit', () => {
+    expect(contextBar(50)).toEqual({ used: 50, cells: '█████░░░░░', level: 'ok' })
+    expect(contextBar(70)).toEqual({ used: 70, cells: '███████░░░', level: 'mid' })
+    expect(contextBar(88)).toEqual({ used: 88, cells: '████████░░', level: 'high' })
+    expect(contextBar(120)).toEqual({ used: 100, cells: '██████████', level: 'full' })
+  })
+
+  test('the level is decided on the exact value, not a rounded one', () => {
+    // 94.6 shows as 95% but is still under the red line.
+    expect(contextBar(94.6).level).toBe('high')
+    expect(contextBar(95).level).toBe('full')
+  })
+
+  test('the limit is auto-compact\'s threshold, the window when it is off, else 80% of the window', () => {
+    expect(towardLimit(150_000, 1_000_000, 300_000, true)).toBe(50)
+    expect(towardLimit(500_000, 1_000_000, 300_000, false)).toBe(50)
+    expect(towardLimit(80_000, 200_000, undefined, true)).toBe(50)
+  })
+
+  test('each level has its own colour on both canvases, and each reaches 3:1', () => {
+    for (const base of ['dark', 'light'] as const) {
+      const canvas = lookOf(PRESETS[0]!, base).canvas
+      const colours = Object.values(BAR_COLOR[base])
+      expect(new Set(colours).size).toBe(4)
+      // Each already reaches 3:1, so the drawing never darkens one: yellow and
+      // orange can't be pushed into the same brown.
+      for (const c of colours) expect(ensureContrast(c, canvas, 3)).toBe(c)
+    }
+  })
+})
+
+describe('model name in the footer', () => {
+  test('ids read as people say them; unknown names pass through', () => {
+    expect(modelName('claude-opus-5-5')).toBe('Opus 5.5')
+    expect(modelName('claude-haiku-4-5-20251001')).toBe('Haiku 4.5')
+    expect(modelName('claude-sonnet-4-20250514')).toBe('Sonnet 4')
+    expect(modelName('claude-sonnet-5-5[1m]')).toBe('Sonnet 5.5 1M')
+    expect(modelName('Opus 5.5')).toBe('Opus 5.5')
+  })
 })

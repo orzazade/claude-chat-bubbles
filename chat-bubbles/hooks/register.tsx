@@ -7,8 +7,8 @@
 import { atom, read, update } from 'claude-code'
 import type { ElementTable, EngineInterface, Register, RenderNode } from 'claude-code'
 
-import type { BaseMode, MessageStyle, Palette, PromptStyle } from '../types'
-import { isHex, normalizeHex } from './color'
+import type { BaseMode, Facts, MessageStyle, Palette, PromptStyle } from '../types'
+import { ensureContrast, isHex, normalizeHex } from './color'
 import { lookOf, stripOf } from './look'
 import type { Base, Look } from './look'
 import { paint } from './markdown'
@@ -49,6 +49,7 @@ const notice = atom({ plugin: 'chat-bubbles', key: 'notice' } as const, '')
 const work = atom({ plugin: 'chat-bubbles', key: 'work' } as const, {})
 const sent = atom({ plugin: 'chat-bubbles', key: 'sent' } as const, {})
 const turns = atom({ plugin: 'chat-bubbles', key: 'turns' } as const, [])
+const footer = atom({ plugin: 'chat-bubbles', key: 'footer' } as const, { model: null, branch: null, context: null, usd: null })
 
 // A stored row's uuid and the id its drawing carries share these characters;
 // the drawn id zeroes the last 12 hex digits.
@@ -171,6 +172,91 @@ async function keep($: EngineInterface, which: 'sent' | 'work', key: string) {
 async function saveMarks($: EngineInterface) {
   await persist($, 'sent', await read($, sent))
   await persist($, 'work', await read($, work))
+}
+
+/**
+ * The context bar, as the old status line drew it: `used` is how far the
+ * session is toward its limit (auto-compact's threshold, or the whole window
+ * when auto-compact is off), ten cells, green → yellow → orange → red.
+ */
+export const contextBar = (used: number) => {
+  const shown = Math.round(Math.max(0, Math.min(100, used)))
+  const filled = Math.min(10, Math.floor(shown / 10))
+  const level = used < 63 ? 'ok' : used < 81 ? 'mid' : used < 95 ? 'high' : 'full'
+  return { used: shown, cells: '█'.repeat(filled) + '░'.repeat(10 - filled), level } as const
+}
+// One set per canvas: the dark set is too pale on a light canvas, and pushing it
+// darker for contrast turns yellow and orange into the same brown.
+export const BAR_COLOR = {
+  dark: { ok: '#4ade80', mid: '#facc15', high: '#fb923c', full: '#f87171' },
+  light: { ok: '#15803d', mid: '#a16207', high: '#c2410c', full: '#b91c1c' },
+} as const
+
+/**
+ * How far the session is toward its limit, 0 to 100+: tokens over auto-compact's
+ * threshold, or over the window when auto-compact is off. Where the host gives
+ * no threshold, 80% of the window, the old status line's rule.
+ */
+export const towardLimit = (tokens: number, window: number, threshold: number | undefined, isAutoCompact: boolean) =>
+  (tokens / (isAutoCompact ? (threshold ?? window * 0.8) : window)) * 100
+
+/**
+ * `claude-opus-5-5` → `Opus 5.5`, `claude-haiku-4-5-20251001` → `Haiku 4.5`,
+ * `claude-sonnet-4-20250514` → `Sonnet 4`, `claude-opus-5-5[1m]` → `Opus 5.5 1M`;
+ * other names as given. A minor version is one or two digits, never a date.
+ */
+export const modelName = (id: string) => {
+  const m = id.match(/^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(\[1m\])?$/)
+  if (!m) return id
+  const [, family = '', major, minor, big] = m
+  const version = minor === undefined ? major : `${major}.${minor}`
+  return `${family.charAt(0).toUpperCase()}${family.slice(1)} ${version}${big ? ' 1M' : ''}`
+}
+
+// The facts the footer row ends with: model · branch · spend · context.
+// Worked out at session start, at each turn's end, after a footer button's
+// command and after a compaction; never on a redraw.
+async function refreshFooter($: EngineInterface) {
+  const facts: Facts = { model: null, branch: null, context: null, usd: null }
+  try {
+    facts.model = modelName(await $.session.model())
+  } catch {
+    // No model name: leave it out.
+  }
+  try {
+    const git = await $.process.run(['git', '-C', await $.session.root(), 'rev-parse', '--abbrev-ref', 'HEAD'])
+    const branch = git.exitCode === 0 ? git.stdout.trim() : ''
+    // A detached HEAD prints `HEAD`: that is no branch.
+    if (branch && branch !== 'HEAD') facts.branch = branch
+  } catch {
+    // Not a git folder, or git missing: no branch.
+  }
+  try {
+    // `summary` estimates locally (no request) and carries the auto-compact threshold.
+    const usage = await $.session.usage({ breakdown: 'summary' })
+    const { tokens, window, breakdown } = usage.context
+    // Absent right after a compaction, until the next response: no bar then.
+    if (typeof tokens === 'number' && window > 0) {
+      facts.context = towardLimit(tokens, window, breakdown?.autoCompactThreshold, breakdown?.isAutoCompactEnabled ?? true)
+    }
+    if (typeof usage.cost?.usd === 'number') facts.usd = usage.cost.usd
+  } catch {
+    // Usage unknown: show what there is.
+  }
+  await update($, footer, () => facts)
+}
+
+// Runs a built-in slash command for a footer button, as if typed. It waits for
+// the session to be idle; a click during a turn runs when the turn ends. The
+// command can change what the footer shows (/model), so it refreshes after.
+async function runCommand($: EngineInterface, command: string) {
+  try {
+    await $.command.run({ command })
+  } catch {
+    $.ui.toast(`/${command} could not run here`)
+    return
+  }
+  await refreshFooter($).catch(() => undefined)
 }
 
 // What the session has spent so far, or null where the host does not say.
@@ -341,13 +427,17 @@ export const register: Register = on => {
     })
     await restore($)
     await resolveBase($)
-    return next(e)
+    const done = await next(e)
+    await refreshFooter($)
+    return done
   })
 
-  // Follow Claude Code's own dark/light setting while the base is `auto`.
-  on('config.set', { key: 'theme' }, async ($, e, next) => {
+  // Follow Claude Code's own dark/light setting while the base is `auto`, and
+  // redo the footer when a setting it shows changes (auto-compact on or off).
+  on('config.set', async ($, e, next) => {
     const done = await next(e)
-    await resolveBase($)
+    if (e.key === 'theme') await resolveBase($)
+    if (e.key === 'autoCompact') await refreshFooter($).catch(() => undefined)
     return done
   })
 
@@ -361,11 +451,34 @@ export const register: Register = on => {
       // When it ended and what it cost, for its turn-end line (matched on duration).
       const end = await sessionUsd($)
       const usd = end !== null && turnStartUsd !== null ? Math.max(0, end - turnStartUsd) : null
-      const at = await $.clock.now()
-      await update($, turns, was => [...was.slice(-199), { durationMs: e.durationMs, at, usd }])
-      await saveMarks($)
+      // Each step on its own: one failing must not skip the others or `next`.
+      try {
+        const at = await $.clock.now()
+        await update($, turns, was => [...was.slice(-199), { durationMs: e.durationMs, at, usd }])
+      } catch {
+        // No clock: this turn's line stays bare.
+      }
+      try {
+        await saveMarks($)
+      } catch {
+        // The store refused: the marks live on in this session's state.
+      }
     }
-    return next(e)
+    // After the engine's own turn end, so the footer never holds it up, and
+    // even when that throws.
+    try {
+      return await next(e)
+    } finally {
+      if (e.agentId === undefined) await refreshFooter($).catch(() => undefined)
+    }
+  })
+
+  // The footer's context bar would stay red after a compaction until the next
+  // turn ends; refresh it once the compaction is done.
+  on('session.compact', async ($, e, next) => {
+    const done = await next(e)
+    if (e.agentId === undefined) await refreshFooter($).catch(() => undefined)
+    return done
   })
 
   on('command.run', { command: 'bubbles' }, async ($, e) => {
@@ -621,13 +734,24 @@ export const register: Register = on => {
     )
   })
 
-  // The footer's mode labels, then the theme's name as a button that opens the studio.
+  // The footer's mode labels, then the session facts: model, branch, cost, context bar.
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
     const current = await currentLook($)
     if (!current) return next(e)
-    const { pal, look } = current
+    const { look } = current
     const isChrome = await read($, themeChrome)
     const { Box, Text, Button } = $.ui.resolve(e)
+    // The session facts as buttons: each opens Claude Code's own view for it
+    // (/model is its model picker). The permission mode has no such door on
+    // purpose; shift+tab changes it.
+    const facts = await read($, footer)
+    const bar = facts.context !== null ? contextBar(facts.context) : null
+    // A hover needs a keyed Box around its Button (the engine refuses the tree otherwise).
+    const fact = (key: string, label: string, command: string) => (
+      <Box key={`${key}-box`}>
+        <Button key={key} label={label} plain hover={{ underline: true }} onPress={() => void runCommand($, command)} />
+      </Box>
+    )
     return (
       <Box flexDirection="row" gap={1}>
         {e.props.modes.length > 0 ? (
@@ -637,16 +761,17 @@ export const register: Register = on => {
             <Text dimColor>{e.props.modes.join(' & ')}</Text>
           )
         ) : null}
-        <Box key="theme-chip" flexDirection="row">
-          {isChrome ? <Text color={look.accent}>{'▍'}</Text> : null}
-          <Button
-            key="open-studio"
-            label={`🎨 ${pal.name}`}
-            plain
-            hover={{ underline: true }}
-            onPress={() => void openStudio($)}
-          />
-        </Box>
+        {facts.model ? fact('fact-model', `${facts.model} ▾`, 'model') : null}
+        {facts.branch ? <Text color={look.quiet}>{facts.branch}</Text> : null}
+        {facts.usd !== null ? fact('fact-cost', `$${facts.usd.toFixed(2)}`, 'cost') : null}
+        {/* The bar comes last, at the row's right edge (user's choice, 10-06). */}
+        {bar ? (
+          <Box key="context-bar" flexDirection="row" gap={1}>
+            {/* The bar is the one place colour reports a level: green → red as auto-compact nears. */}
+            <Text color={ensureContrast(BAR_COLOR[look.base][bar.level], look.canvas, 3)}>{bar.cells}</Text>
+            {fact('fact-context', `${bar.used}%`, 'context')}
+          </Box>
+        ) : null}
       </Box>
     )
   })
@@ -655,6 +780,8 @@ export const register: Register = on => {
   // its own line (its pills stay live); other surfaces take the tree.
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
     const current = await chromeLook($)
+    // The terminal keeps the engine's line, so the live mode badge stays. The
+    // session facts sit at the row's right end as buttons (SessionMode).
     if (!current || e.surface === 'terminal') return next(e)
     const { Text } = $.ui.resolve(e)
     return <Text color={current.look.quiet}>{e.props.tail ? `${e.props.hint} ${e.props.tail}` : e.props.hint}</Text>

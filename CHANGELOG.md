@@ -3,6 +3,27 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 versions follow [Semantic Versioning](https://semver.org/).
 
+## Chat Bubbles [0.3.1] — 2026-10-06 (orzazade fork)
+
+One footer row instead of two.
+
+### Changed
+
+- **The session facts sit at the right end of Claude Code's own footer row**,
+  as buttons: `Opus 5.5 ▾` opens `/model` (the model picker), the cost opens
+  `/cost`, and the context bar opens `/context`. The branch is plain text. A
+  custom status line can't share that row (it always draws its own line above
+  it), so this replaces one.
+- **A coloured context bar comes last**: 10 cells where 100% is where
+  auto-compact starts (its real threshold, read from Claude Code; the whole
+  window when auto-compact is off); green below 63%, yellow below 81%, orange
+  below 95%, then red. Light themes get their own four colours.
+- **No theme chip in the footer.** `/bubbles` still opens the theme studio.
+- The model name reads as people say it (`Opus 5.5`, `Sonnet 4`, `Opus 5.5 1M`).
+- The facts are worked out at session start, at each turn's end, after a footer
+  button's command and after a compaction; never per redraw. A detached HEAD
+  shows no branch.
+
 ## Chat Bubbles [0.3.0] — 2026-10-06 (orzazade fork)
 
 A redesign for reading speed. The rules are in [DESIGN.md](DESIGN.md).

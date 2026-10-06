@@ -23,6 +23,13 @@ export type MessageStyle = 'full' | 'outline' | 'off'
 /** How your own prompts are drawn: a text bubble, a frame around the app's own row (keeps pasted images), or the app's row untouched. */
 export type PromptStyle = 'bubble' | 'frame' | 'native'
 
+/**
+ * The session facts the footer shows; null where the host does not say.
+ * `context` is how far the session is toward its limit (auto-compact's
+ * threshold, or the window when that is off), 0 to 100+, unrounded.
+ */
+export type Facts = { model: string | null; branch: string | null; context: number | null; usd: number | null }
+
 /** Which canvas the theme is tuned for; `auto` follows Claude Code's own theme setting. */
 export type BaseMode = 'auto' | 'dark' | 'light'
 
@@ -69,6 +76,8 @@ declare module 'claude-code' {
        * finds its own by duration.
        */
       turns: { durationMs: number; at: number; usd: number | null }[]
+      /** The session facts the footer shows: model, branch, spend, context bar. */
+      footer: Facts
     }
   }
 }
