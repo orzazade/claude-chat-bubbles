@@ -7,3 +7,5 @@ node_modules/
 *.log
 .DS_Store
 Thumbs.db
+CLAUDE.md
+AGENTS.md
